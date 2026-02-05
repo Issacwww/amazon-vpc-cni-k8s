@@ -194,6 +194,7 @@ func add(args *skel.CmdArgs, cniTypes typeswrapper.CNITYPES, grpcClient grpcwrap
 			K8S_POD_NAME:               string(k8sArgs.K8S_POD_NAME),
 			K8S_POD_NAMESPACE:          string(k8sArgs.K8S_POD_NAMESPACE),
 			K8S_POD_INFRA_CONTAINER_ID: string(k8sArgs.K8S_POD_INFRA_CONTAINER_ID),
+			K8S_POD_UID:                string(k8sArgs.K8S_POD_UID),
 			Netns:                      args.Netns,
 			ContainerID:                args.ContainerID,
 			NetworkName:                conf.Name,

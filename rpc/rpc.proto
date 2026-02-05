@@ -21,7 +21,8 @@ message AddNetworkRequest {
   string NetworkName = 6;
   string Netns = 4;
   bool RequiresMultiNICAttachment = 9;
-  // next field: 10
+  string K8S_POD_UID = 10;
+  // next field: 11
 }
 
 message IPAllocationMetadata {

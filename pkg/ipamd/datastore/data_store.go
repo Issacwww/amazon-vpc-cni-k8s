@@ -104,9 +104,11 @@ func (k IPAMKey) String() string {
 
 // IPAMMetadata is the metadata associated with IP allocations.
 type IPAMMetadata struct {
-	K8SPodNamespace string `json:"k8sPodNamespace,omitempty"`
-	K8SPodName      string `json:"k8sPodName,omitempty"`
-	InterfacesCount int    `json:"interfacesCount,omitempty"`
+	K8SPodNamespace string            `json:"k8sPodNamespace,omitempty"`
+	K8SPodName      string            `json:"k8sPodName,omitempty"`
+	K8SPodUID       string            `json:"k8sPodUID,omitempty"`
+	K8SPodLabels    map[string]string `json:"k8sPodLabels,omitempty"`
+	InterfacesCount int               `json:"interfacesCount,omitempty"`
 }
 
 // ENI represents a single ENI. Exported fields will be marshaled for introspection.
@@ -122,6 +124,8 @@ type ENI struct {
 	IsEFA bool
 	// DeviceNumber is the device number of ENI (0 means the primary ENI)
 	DeviceNumber int
+	// SubnetID is the subnet ID where this ENI resides
+	SubnetID string
 	// IPv4Addresses shows whether each address is assigned, the key is IP address, which must
 	// be in dot-decimal notation with no leading zeros and no whitespace(eg: "10.1.0.253")
 	// Key is the IP address - PD: "IP/28" and SIP: "IP/32"
@@ -271,19 +275,41 @@ type PodIPInfo struct {
 	DeviceNumber int
 }
 
+// TrafficMapping represents an IP to pod mapping for VPC Flow Log enrichment.
+type TrafficMapping struct {
+	// ENIID is the ENI where this IP was assigned
+	ENIID string
+	// ID is a unique identifier for this mapping, format: "ip/podUID"
+	ID string
+	// IP is the IP address assigned to the pod
+	IP string
+	// PodName is the name of the pod
+	PodName string
+	// PodNamespace is the namespace of the pod
+	PodNamespace string
+	// PodUID is the unique identifier of the pod
+	PodUID string
+	// PodLabels contains the labels of the pod
+	PodLabels map[string]string
+	// BeginTime is the Unix timestamp (seconds) when this IP was assigned
+	BeginTime int64
+	// EndTime is the Unix timestamp (seconds) when this IP was unassigned (nil if still active)
+	EndTime *int64
+}
+
 // DataStore contains node level ENI/IP
 type DataStore struct {
-	total            int
-	assigned         int
-	allocatedPrefix  int
-	eniPool          ENIPool
-	lock             sync.Mutex
-	log              logger.Logger
-	backingStore     Checkpointer
-	netLink          netlinkwrapper.NetLink
-	isPDEnabled      bool
-	ipCooldownPeriod time.Duration
-	networkCard      int
+	total                   int
+	assigned                int
+	allocatedPrefix         int
+	eniPool                 ENIPool
+	lock                    sync.Mutex
+	log                     logger.Logger
+	backingStore            Checkpointer
+	netLink                 netlinkwrapper.NetLink
+	isPDEnabled             bool
+	ipCooldownPeriod        time.Duration
+	networkCard             int
 }
 
 // ENIInfos contains ENI IP information
@@ -452,7 +478,7 @@ func (ds *DataStore) writeBackingStoreUnsafe() error {
 }
 
 // AddENI add ENI to data store
-func (ds *DataStore) AddENI(eniID string, deviceNumber int, isPrimary, isTrunk, isEFA bool, routeTableID int) error {
+func (ds *DataStore) AddENI(eniID string, deviceNumber int, isPrimary, isTrunk, isEFA bool, subnetID string, routeTableID int) error {
 	ds.lock.Lock()
 	defer ds.lock.Unlock()
 
@@ -469,6 +495,7 @@ func (ds *DataStore) AddENI(eniID string, deviceNumber int, isPrimary, isTrunk, 
 		IsEFA:              isEFA,
 		ID:                 eniID,
 		DeviceNumber:       deviceNumber,
+		SubnetID:           subnetID,
 		AvailableIPv4Cidrs: make(map[string]*CidrInfo),
 		IPv6Cidrs:          make(map[string]*CidrInfo),
 		RouteTableID:       routeTableID,
@@ -753,6 +780,7 @@ func (ds *DataStore) AssignPodIPv4Address(ipamKey IPAMKey, ipamMetadata IPAMMeta
 }
 
 // assignPodIPAddressUnsafe mark Address as assigned.
+// Also cleans up deleted mappings (IPs with EndTime > 0) from previous pod events.
 func (ds *DataStore) assignPodIPAddressUnsafe(addr *AddressInfo, ipamKey IPAMKey, ipamMetadata IPAMMetadata, assignedTime time.Time) {
 	ds.log.Infof("assignPodIPAddressUnsafe: Assign IP %v to sandbox %s with metadata %+v",
 		addr.Address, ipamKey, ipamMetadata)
@@ -760,6 +788,11 @@ func (ds *DataStore) assignPodIPAddressUnsafe(addr *AddressInfo, ipamKey IPAMKey
 	if addr.Assigned() {
 		panic("addr already assigned")
 	}
+
+	// Clean up deleted mappings from previous pod events
+	// This reduces CNINode updates by only cleaning up when there's new data to write
+	ds.cleanupDeletedMappingsUnsafe()
+
 	addr.IPAMKey = ipamKey // This marks the addr as assigned
 	addr.IPAMMetadata = ipamMetadata
 	addr.AssignedTime = assignedTime
@@ -769,7 +802,39 @@ func (ds *DataStore) assignPodIPAddressUnsafe(addr *AddressInfo, ipamKey IPAMKey
 	prometheusmetrics.AssignedIPs.Set(float64(ds.assigned))
 }
 
+// cleanupDeletedMappingsUnsafe clears metadata from IPs that have been unassigned.
+// This is called on pod assignment to clean up deleted mappings from previous events.
+// The watcher will have already seen the EndTime before this cleanup happens.
+func (ds *DataStore) cleanupDeletedMappingsUnsafe() {
+	for _, eni := range ds.eniPool {
+		// Clean up v4 prefixes
+		for _, cidr := range eni.AvailableIPv4Cidrs {
+			for _, addr := range cidr.IPAddresses {
+				// If IP is unassigned and has metadata, clear it
+				if !addr.Assigned() && addr.IPAMMetadata.K8SPodUID != "" {
+					ds.log.Debugf("cleanupDeletedMappingsUnsafe: clearing metadata for IP %s (was pod %s/%s)",
+						addr.Address, addr.IPAMMetadata.K8SPodNamespace, addr.IPAMMetadata.K8SPodName)
+					addr.IPAMMetadata = IPAMMetadata{}
+				}
+			}
+		}
+		// Clean up v6 prefixes
+		for _, cidr := range eni.IPv6Cidrs {
+			for _, addr := range cidr.IPAddresses {
+				// If IP is unassigned and has metadata, clear it
+				if !addr.Assigned() && addr.IPAMMetadata.K8SPodUID != "" {
+					ds.log.Debugf("cleanupDeletedMappingsUnsafe: clearing metadata for IP %s (was pod %s/%s)",
+						addr.Address, addr.IPAMMetadata.K8SPodNamespace, addr.IPAMMetadata.K8SPodName)
+					addr.IPAMMetadata = IPAMMetadata{}
+				}
+			}
+		}
+	}
+}
+
 // unassignPodIPAddressUnsafe mark Address as unassigned.
+// Note: We keep IPAMMetadata to allow GetENITrafficMappings to report recently unassigned IPs with accurate EndTime.
+// The metadata will be cleaned up on the next pod event (assign or unassign).
 func (ds *DataStore) unassignPodIPAddressUnsafe(addr *AddressInfo) {
 	if !addr.Assigned() {
 		// Already unassigned
@@ -777,8 +842,12 @@ func (ds *DataStore) unassignPodIPAddressUnsafe(addr *AddressInfo) {
 	}
 	ds.log.Infof("unassignPodIPAddressUnsafe: Unassign IP %v from sandbox %s",
 		addr.Address, addr.IPAMKey)
-	addr.IPAMKey = IPAMKey{} // unassign the addr
-	addr.IPAMMetadata = IPAMMetadata{}
+
+	// Clean up deleted mappings from previous pod events before adding this new deletion
+	// This reduces CNINode updates by only cleaning up when there's new data to write
+	ds.cleanupDeletedMappingsUnsafe()
+
+	addr.IPAMKey = IPAMKey{} // unassign the addr (but keep IPAMMetadata for EndTime reporting)
 	ds.assigned--
 	// Prometheus gauge
 	prometheusmetrics.AssignedIPs.Set(float64(ds.assigned))
@@ -856,6 +925,193 @@ func (ds *DataStore) GetEFAENIs() map[string]bool {
 		}
 	}
 	return ret
+}
+
+// PodIPAllocationInfo contains information about an IP allocated to a pod.
+type PodIPAllocationInfo struct {
+	PodName      string
+	PodNamespace string
+	PodUID       string
+	IPv4Address  string
+	IPv6Address  string
+}
+
+// ENITrafficMapping represents traffic mappings for a single ENI.
+type ENITrafficMapping struct {
+	ENIID           string
+	SubnetID        string
+	TrafficMappings []TrafficMapping
+}
+
+// makeTrafficMappingID creates a unique ID for a traffic mapping in format "ip/podUID"
+func makeTrafficMappingID(ip, podUID string) string {
+	return ip + "/" + podUID
+}
+
+// GetENITrafficMappings returns all ENIs with their traffic mappings.
+// This is used for CNINode status updates to support VPC Flow Log enrichment.
+// 
+// The returned data includes:
+// - Active mappings (EndTime=nil): currently assigned pod-IP mappings
+// - Deleted mappings (EndTime!=nil): IPs that were unassigned, kept until next pod event
+//
+// Deleted mappings are cleaned up on the next pod event (add/delete), not by time.
+// This reduces unnecessary CNINode updates and watcher triggers.
+func (ds *DataStore) GetENITrafficMappings() []ENITrafficMapping {
+	ds.lock.Lock()
+	defer ds.lock.Unlock()
+
+	// Build result directly, tracking ENI info
+	type eniInfo struct {
+		subnetID string
+		mappings []TrafficMapping
+	}
+	eniData := make(map[string]*eniInfo)
+
+	// Add mappings from eniPool (both active and deleted)
+	for _, eni := range ds.eniPool {
+		// Initialize ENI entry if not exists
+		if _, exists := eniData[eni.ID]; !exists {
+			eniData[eni.ID] = &eniInfo{
+				subnetID: eni.SubnetID,
+				mappings: []TrafficMapping{},
+			}
+		}
+
+		// Loop through ENI's v4 prefixes
+		for _, assignedAddr := range eni.AvailableIPv4Cidrs {
+			for _, addr := range assignedAddr.IPAddresses {
+				// Skip IPs without pod metadata
+				if addr.IPAMMetadata.K8SPodUID == "" {
+					continue
+				}
+
+				if addr.Assigned() {
+					// Active mapping - EndTime is nil
+					mapping := TrafficMapping{
+						ENIID:        eni.ID,
+						ID:           makeTrafficMappingID(addr.Address, addr.IPAMMetadata.K8SPodUID),
+						IP:           addr.Address,
+						PodName:      addr.IPAMMetadata.K8SPodName,
+						PodNamespace: addr.IPAMMetadata.K8SPodNamespace,
+						PodUID:       addr.IPAMMetadata.K8SPodUID,
+						PodLabels:    addr.IPAMMetadata.K8SPodLabels,
+						BeginTime:    addr.AssignedTime.Unix(),
+						EndTime:      nil,
+					}
+					eniData[eni.ID].mappings = append(eniData[eni.ID].mappings, mapping)
+				} else if !addr.UnassignedTime.IsZero() {
+					// Deleted mapping - include with EndTime pointer
+					endTime := addr.UnassignedTime.Unix()
+					mapping := TrafficMapping{
+						ENIID:        eni.ID,
+						ID:           makeTrafficMappingID(addr.Address, addr.IPAMMetadata.K8SPodUID),
+						IP:           addr.Address,
+						PodName:      addr.IPAMMetadata.K8SPodName,
+						PodNamespace: addr.IPAMMetadata.K8SPodNamespace,
+						PodUID:       addr.IPAMMetadata.K8SPodUID,
+						PodLabels:    addr.IPAMMetadata.K8SPodLabels,
+						BeginTime:    addr.AssignedTime.Unix(),
+						EndTime:      &endTime,
+					}
+					eniData[eni.ID].mappings = append(eniData[eni.ID].mappings, mapping)
+				}
+			}
+		}
+		// Loop through ENI's v6 prefixes
+		for _, assignedAddr := range eni.IPv6Cidrs {
+			for _, addr := range assignedAddr.IPAddresses {
+				// Skip IPs without pod metadata
+				if addr.IPAMMetadata.K8SPodUID == "" {
+					continue
+				}
+
+				if addr.Assigned() {
+					// Active mapping - EndTime is nil
+					mapping := TrafficMapping{
+						ENIID:        eni.ID,
+						ID:           makeTrafficMappingID(addr.Address, addr.IPAMMetadata.K8SPodUID),
+						IP:           addr.Address,
+						PodName:      addr.IPAMMetadata.K8SPodName,
+						PodNamespace: addr.IPAMMetadata.K8SPodNamespace,
+						PodUID:       addr.IPAMMetadata.K8SPodUID,
+						PodLabels:    addr.IPAMMetadata.K8SPodLabels,
+						BeginTime:    addr.AssignedTime.Unix(),
+						EndTime:      nil,
+					}
+					eniData[eni.ID].mappings = append(eniData[eni.ID].mappings, mapping)
+				} else if !addr.UnassignedTime.IsZero() {
+					// Deleted mapping - include with EndTime pointer
+					endTime := addr.UnassignedTime.Unix()
+					mapping := TrafficMapping{
+						ENIID:        eni.ID,
+						ID:           makeTrafficMappingID(addr.Address, addr.IPAMMetadata.K8SPodUID),
+						IP:           addr.Address,
+						PodName:      addr.IPAMMetadata.K8SPodName,
+						PodNamespace: addr.IPAMMetadata.K8SPodNamespace,
+						PodUID:       addr.IPAMMetadata.K8SPodUID,
+						PodLabels:    addr.IPAMMetadata.K8SPodLabels,
+						BeginTime:    addr.AssignedTime.Unix(),
+						EndTime:      &endTime,
+					}
+					eniData[eni.ID].mappings = append(eniData[eni.ID].mappings, mapping)
+				}
+			}
+		}
+	}
+
+	// Convert map to slice
+	var result []ENITrafficMapping
+	for eniID, info := range eniData {
+		result = append(result, ENITrafficMapping{
+			ENIID:           eniID,
+			SubnetID:        info.subnetID,
+			TrafficMappings: info.mappings,
+		})
+	}
+
+	return result
+}
+
+// GetPodIPAllocations returns all IP addresses currently allocated to pods.
+// This is used for CNINode status updates to support VPC Flow Log enrichment.
+// Deprecated: Use GetENITrafficMappings for ENI-grouped data with history.
+func (ds *DataStore) GetPodIPAllocations() []PodIPAllocationInfo {
+	ds.lock.Lock()
+	defer ds.lock.Unlock()
+
+	var allocations []PodIPAllocationInfo
+
+	for _, eni := range ds.eniPool {
+		// Loop through ENI's v4 prefixes
+		for _, assignedAddr := range eni.AvailableIPv4Cidrs {
+			for _, addr := range assignedAddr.IPAddresses {
+				if addr.Assigned() {
+					allocations = append(allocations, PodIPAllocationInfo{
+						PodName:      addr.IPAMMetadata.K8SPodName,
+						PodNamespace: addr.IPAMMetadata.K8SPodNamespace,
+						PodUID:       addr.IPAMMetadata.K8SPodUID,
+						IPv4Address:  addr.Address,
+					})
+				}
+			}
+		}
+		// Loop through ENI's v6 prefixes
+		for _, assignedAddr := range eni.IPv6Cidrs {
+			for _, addr := range assignedAddr.IPAddresses {
+				if addr.Assigned() {
+					allocations = append(allocations, PodIPAllocationInfo{
+						PodName:      addr.IPAMMetadata.K8SPodName,
+						PodNamespace: addr.IPAMMetadata.K8SPodNamespace,
+						PodUID:       addr.IPAMMetadata.K8SPodUID,
+						IPv6Address:  addr.Address,
+					})
+				}
+			}
+		}
+	}
+
+	return allocations
 }
 
 // IsRequiredForWarmIPTarget determines if this ENI has warm IPs that are required to fulfill whatever WARM_IP_TARGET is set to.
@@ -1130,6 +1386,7 @@ func (ds *DataStore) UnassignPodIPAddress(ipamKey IPAMKey) (e *ENI, ip string, d
 
 	originalIPAMMetadata := addr.IPAMMetadata
 	originalAssignedTime := addr.AssignedTime
+
 	ds.unassignPodIPAddressUnsafe(addr)
 	if err := ds.writeBackingStoreUnsafe(); err != nil {
 		// Unwind un-assignment

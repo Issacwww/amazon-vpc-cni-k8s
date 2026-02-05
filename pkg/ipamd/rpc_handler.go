@@ -220,9 +220,34 @@ func (s *server) AddNetwork(ctx context.Context, in *rpc.AddNetworkRequest) (*rp
 				NetworkName: in.NetworkName,
 			}
 
+			// Get Pod metadata - either from the request or by looking it up from the API server
+			podUID := in.K8S_POD_UID
+			var podLabels map[string]string
+			if s.ipamContext.k8sClient != nil && in.K8S_POD_NAME != "" && in.K8S_POD_NAMESPACE != "" {
+				// Look up pod from API server to get UID and labels
+				pod, err := s.ipamContext.GetPod(in.K8S_POD_NAME, in.K8S_POD_NAMESPACE)
+				if err != nil {
+					log.Warnf("Failed to get pod %s/%s for metadata lookup: %v", in.K8S_POD_NAMESPACE, in.K8S_POD_NAME, err)
+				} else if pod != nil {
+					if podUID == "" {
+						podUID = string(pod.UID)
+						log.Debugf("Looked up Pod UID %s for pod %s/%s", podUID, in.K8S_POD_NAMESPACE, in.K8S_POD_NAME)
+					}
+					// Copy pod labels for VPC Flow Log enrichment
+					if len(pod.Labels) > 0 {
+						podLabels = make(map[string]string, len(pod.Labels))
+						for k, v := range pod.Labels {
+							podLabels[k] = v
+						}
+					}
+				}
+			}
+
 			ipamMetadata = datastore.IPAMMetadata{
 				K8SPodNamespace: in.K8S_POD_NAMESPACE,
 				K8SPodName:      in.K8S_POD_NAME,
+				K8SPodUID:       podUID,
+				K8SPodLabels:    podLabels,
 				InterfacesCount: ipsRequired,
 			}
 
@@ -305,6 +330,12 @@ func (s *server) AddNetwork(ctx context.Context, in *rpc.AddNetworkRequest) (*rp
 			PodENISubnetGW:       podENISubnetGW,
 			ParentIfIndex:        int32(trunkENILinkIndex),
 			NetworkPolicyMode:    s.ipamContext.networkPolicyMode,
+		}
+
+		// Update CNINode status with traffic mappings (event-driven)
+		if err := s.ipamContext.UpdateCNINodePodIPAllocations(ctx); err != nil {
+			log.Warnf("Failed to update CNINode after AddNetwork: %v", err)
+			// Don't fail the operation - this is non-critical
 		}
 	}
 
@@ -444,6 +475,14 @@ func (s *server) DelNetwork(ctx context.Context, in *rpc.DelNetworkRequest) (*rp
 		if err != nil {
 			log.Errorf("Failed to delete the pod annotation: %v", err)
 			errors = multiErr.Append(errors, err)
+		}
+	}
+
+	// Update CNINode status with traffic mappings (event-driven)
+	if ipsFound > 0 {
+		if err := s.ipamContext.UpdateCNINodePodIPAllocations(ctx); err != nil {
+			log.Warnf("Failed to update CNINode after DelNetwork: %v", err)
+			// Don't fail the operation - this is non-critical
 		}
 	}
 

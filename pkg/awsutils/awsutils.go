@@ -276,6 +276,9 @@ type ENIMetadata struct {
 
 	// Network card the ENI is attached on
 	NetworkCard int
+
+	// SubnetID is the subnet ID where this ENI resides
+	SubnetID string
 }
 
 // PrimaryIPv4Address returns the primary IPv4 address of this node
@@ -686,6 +689,12 @@ func (cache *EC2InstanceMetadataCache) getENIMetadata(eniMAC string) (ENIMetadat
 	}
 
 	if !ipv4Available && !ipv6Available {
+		// Get SubnetID for EFA-only interfaces
+		eniSubnetID, err := cache.imds.GetSubnetID(ctx, eniMAC)
+		if err != nil {
+			awsAPIErrInc("GetSubnetID", err)
+			return ENIMetadata{}, err
+		}
 		return ENIMetadata{
 			ENIID:          eniID,
 			MAC:            eniMAC,
@@ -697,6 +706,7 @@ func (cache *EC2InstanceMetadataCache) getENIMetadata(eniMAC string) (ENIMetadat
 			IPv6Addresses:  make([]ec2types.NetworkInterfaceIpv6Address, 0),
 			IPv6Prefixes:   make([]ec2types.Ipv6PrefixSpecification, 0),
 			NetworkCard:    networkCard,
+			SubnetID:       eniSubnetID,
 		}, nil
 	}
 
@@ -789,6 +799,13 @@ func (cache *EC2InstanceMetadataCache) getENIMetadata(eniMAC string) (ENIMetadat
 		}
 	}
 
+	// Get SubnetID for this ENI
+	eniSubnetID, err := cache.imds.GetSubnetID(ctx, eniMAC)
+	if err != nil {
+		awsAPIErrInc("GetSubnetID", err)
+		return ENIMetadata{}, err
+	}
+
 	return ENIMetadata{
 		ENIID:          eniID,
 		MAC:            eniMAC,
@@ -800,6 +817,7 @@ func (cache *EC2InstanceMetadataCache) getENIMetadata(eniMAC string) (ENIMetadat
 		IPv6Addresses:  ec2ip6s,
 		IPv6Prefixes:   ec2ipv6Prefixes,
 		NetworkCard:    networkCard,
+		SubnetID:       eniSubnetID,
 	}, nil
 }
 

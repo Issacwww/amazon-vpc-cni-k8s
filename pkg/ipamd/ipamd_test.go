@@ -585,7 +585,7 @@ func testIncreaseIPPool(t *testing.T, useENIConfig bool, unschedulableNode bool,
 	}
 
 	if subnetDiscovery {
-		mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI(primaryENIid, primaryDevice, true, false, false, networkutils.CalculateRouteTableId(primaryDevice, 0))
+		mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI(primaryENIid, primaryDevice, true, false, false, "", networkutils.CalculateRouteTableId(primaryDevice, 0))
 	}
 
 	primary := true
@@ -766,7 +766,7 @@ func testIncreasePrefixPool(t *testing.T, useENIConfig, subnetDiscovery bool, en
 
 	mockContext.dataStoreAccess = testDatastorewithPrefix()
 	if subnetDiscovery {
-		mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI(primaryENIid, primaryDevice, true, false, false, networkutils.CalculateRouteTableId(primaryDevice, 0))
+		mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI(primaryENIid, primaryDevice, true, false, false, "", networkutils.CalculateRouteTableId(primaryDevice, 0))
 	}
 
 	primary := true
@@ -900,12 +900,12 @@ func TestDecreaseIPPool(t *testing.T) {
 	// TODO Fix getting datastore
 	mockContext.dataStoreAccess = testDatastore()
 
-	mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI(primaryENIid, primaryDevice, true, false, false, networkutils.CalculateRouteTableId(primaryDevice, 0))
+	mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI(primaryENIid, primaryDevice, true, false, false, "", networkutils.CalculateRouteTableId(primaryDevice, 0))
 	mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddIPv4CidrToStore(primaryENIid, testAddr1, false)
 	mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddIPv4CidrToStore(primaryENIid, testAddr2, false)
 	mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AssignPodIPv4Address(datastore.IPAMKey{ContainerID: "container1"}, datastore.IPAMMetadata{K8SPodName: "pod1"})
 
-	mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI(secENIid, secDevice, true, false, false, networkutils.CalculateRouteTableId(secDevice, 0))
+	mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI(secENIid, secDevice, true, false, false, "", networkutils.CalculateRouteTableId(secDevice, 0))
 	mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddIPv4CidrToStore(secENIid, testAddr11, false)
 	mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddIPv4CidrToStore(secENIid, testAddr12, false)
 	mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AssignPodIPv4Address(datastore.IPAMKey{ContainerID: "container2"}, datastore.IPAMMetadata{K8SPodName: "pod2"})
@@ -1283,7 +1283,7 @@ func TestGetWarmIPTargetState(t *testing.T) {
 	assert.Equal(t, 0, over)
 
 	// add 2 addresses to datastore
-	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI("eni-1", 1, true, false, false, networkutils.CalculateRouteTableId(1, 0))
+	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI("eni-1", 1, true, false, false, "", networkutils.CalculateRouteTableId(1, 0))
 	ipv4Addr := net.IPNet{IP: net.ParseIP("1.1.1.1"), Mask: net.IPv4Mask(255, 255, 255, 255)}
 	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddIPv4CidrToStore("eni-1", ipv4Addr, false)
 	ipv4Addr = net.IPNet{IP: net.ParseIP("1.1.1.2"), Mask: net.IPv4Mask(255, 255, 255, 255)}
@@ -1333,10 +1333,10 @@ func TestGetWarmIPTargetStateWithPDenabled(t *testing.T) {
 	assert.Equal(t, 0, over)
 
 	// add 2 addresses to datastore
-	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI("eni-1", 1, true, false, false, networkutils.CalculateRouteTableId(1, 0))
+	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI("eni-1", 1, true, false, false, "", networkutils.CalculateRouteTableId(1, 0))
 	_, ipnet, _ := net.ParseCIDR("10.1.1.0/28")
 	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddIPv4CidrToStore("eni-1", *ipnet, true)
-	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI("eni-2", 2, true, false, false, networkutils.CalculateRouteTableId(2, 0))
+	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI("eni-2", 2, true, false, false, "", networkutils.CalculateRouteTableId(2, 0))
 	_, ipnet, _ = net.ParseCIDR("20.1.1.0/28")
 	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddIPv4CidrToStore("eni-1", *ipnet, true)
 
@@ -1473,7 +1473,7 @@ func testDatastorewithPrefix() *datastore.DataStoreAccess {
 
 func datastoreWith3FreeIPs() *datastore.DataStoreAccess {
 	datastoreWith3FreeIPs := testDatastore()
-	_ = datastoreWith3FreeIPs.GetDataStore(defaultNetworkCard).AddENI(primaryENIid, 0, true, false, false, networkutils.CalculateRouteTableId(0, 0))
+	_ = datastoreWith3FreeIPs.GetDataStore(defaultNetworkCard).AddENI(primaryENIid, 0, true, false, false, "", networkutils.CalculateRouteTableId(0, 0))
 	ipv4Addr := net.IPNet{IP: net.ParseIP(ipaddr01), Mask: net.IPv4Mask(255, 255, 255, 255)}
 	_ = datastoreWith3FreeIPs.GetDataStore(defaultNetworkCard).AddIPv4CidrToStore(primaryENIid, ipv4Addr, false)
 	ipv4Addr = net.IPNet{IP: net.ParseIP(ipaddr02), Mask: net.IPv4Mask(255, 255, 255, 255)}
@@ -1516,7 +1516,7 @@ func datastoreWith3Pods() *datastore.DataStoreAccess {
 
 func datastoreWithFreeIPsFromPrefix() *datastore.DataStoreAccess {
 	datastoreWithFreeIPs := testDatastorewithPrefix()
-	_ = datastoreWithFreeIPs.GetDataStore(defaultNetworkCard).AddENI(primaryENIid, 0, true, false, false, networkutils.CalculateRouteTableId(0, 0))
+	_ = datastoreWithFreeIPs.GetDataStore(defaultNetworkCard).AddENI(primaryENIid, 0, true, false, false, "", networkutils.CalculateRouteTableId(0, 0))
 	_, ipnet, _ := net.ParseCIDR(prefix01)
 	_ = datastoreWithFreeIPs.GetDataStore(defaultNetworkCard).AddIPv4CidrToStore(primaryENIid, *ipnet, true)
 	return datastoreWithFreeIPs
@@ -1809,7 +1809,7 @@ func TestNodeIPPoolReconcileBadIMDSData(t *testing.T) {
 	testAddr1 := *primaryENIMetadata.IPv4Addresses[0].PrivateIpAddress
 	// Add ENI and IPs to datastore
 	eniID := primaryENIMetadata.ENIID
-	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI(eniID, primaryENIMetadata.DeviceNumber, true, false, false, networkutils.CalculateRouteTableId(primaryENIMetadata.DeviceNumber, 0))
+	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI(eniID, primaryENIMetadata.DeviceNumber, true, false, false, "", networkutils.CalculateRouteTableId(primaryENIMetadata.DeviceNumber, 0))
 	mockContext.primaryIP[eniID] = testAddr1
 	mockContext.addENIsecondaryIPsToDataStore(primaryENIMetadata.IPv4Addresses, eniID, defaultNetworkCard)
 	curENIs := mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).GetENIInfos()
@@ -1897,7 +1897,7 @@ func TestNodePrefixPoolReconcileBadIMDSData(t *testing.T) {
 	testAddr1 := *primaryENIMetadata.IPv4Addresses[0].PrivateIpAddress
 	// Add ENI and IPs to datastore
 	eniID := primaryENIMetadata.ENIID
-	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI(eniID, primaryENIMetadata.DeviceNumber, true, false, false, networkutils.CalculateRouteTableId(primaryENIMetadata.DeviceNumber, 0))
+	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI(eniID, primaryENIMetadata.DeviceNumber, true, false, false, "", networkutils.CalculateRouteTableId(primaryENIMetadata.DeviceNumber, 0))
 	mockContext.primaryIP[eniID] = testAddr1
 	mockContext.addENIv4prefixesToDataStore(primaryENIMetadata.IPv4Prefixes, eniID, defaultNetworkCard)
 	curENIs := mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).GetENIInfos()
@@ -2201,7 +2201,7 @@ func TestIPAMContext_enableSecurityGroupsForPods(t *testing.T) {
 	err := m.k8sClient.Create(ctx, &fakeCNINode)
 	assert.NoError(t, err)
 
-	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI("eni-1", 1, true, false, false, networkutils.CalculateRouteTableId(1, 0))
+	_ = mockContext.dataStoreAccess.GetDataStore(defaultNetworkCard).AddENI("eni-1", 1, true, false, false, "", networkutils.CalculateRouteTableId(1, 0))
 	// If ENABLE_POD_ENI is not set, nothing happens
 	mockContext.tryEnableSecurityGroupsForPods(ctx)
 

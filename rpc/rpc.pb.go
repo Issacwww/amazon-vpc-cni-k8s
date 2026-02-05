@@ -34,7 +34,8 @@ type AddNetworkRequest struct {
 	IfName                     string `protobuf:"bytes,5,opt,name=IfName,proto3" json:"IfName,omitempty"`
 	NetworkName                string `protobuf:"bytes,6,opt,name=NetworkName,proto3" json:"NetworkName,omitempty"`
 	Netns                      string `protobuf:"bytes,4,opt,name=Netns,proto3" json:"Netns,omitempty"`
-	RequiresMultiNICAttachment bool   `protobuf:"varint,9,opt,name=RequiresMultiNICAttachment,proto3" json:"RequiresMultiNICAttachment,omitempty"` // next field: 10
+	RequiresMultiNICAttachment bool   `protobuf:"varint,9,opt,name=RequiresMultiNICAttachment,proto3" json:"RequiresMultiNICAttachment,omitempty"`
+	K8S_POD_UID                string `protobuf:"bytes,10,opt,name=K8S_POD_UID,json=K8SPODUID,proto3" json:"K8S_POD_UID,omitempty"` // next field: 11
 }
 
 func (x *AddNetworkRequest) Reset() {
@@ -130,6 +131,13 @@ func (x *AddNetworkRequest) GetRequiresMultiNICAttachment() bool {
 		return x.RequiresMultiNICAttachment
 	}
 	return false
+}
+
+func (x *AddNetworkRequest) GetK8S_POD_UID() string {
+	if x != nil {
+		return x.K8S_POD_UID
+	}
+	return ""
 }
 
 type IPAllocationMetadata struct {

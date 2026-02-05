@@ -15,6 +15,7 @@ package ipamd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -202,6 +203,10 @@ const (
 	// This configures the ENIs on Network Card > 0 which is be used by pods that require multi-nic attachments
 	envEnableMultiNICSupport = "ENABLE_MULTI_NIC"
 
+	// envVPCFlowlogEnrichment is used to enable VPC Flow Log enrichment feature.
+	// When enabled, IPAMD will update CNINode status with pod IP allocations.
+	envVPCFlowlogEnrichment = "VPC_FLOWLOG_ENRICHMENT"
+
 	// Scale config for network cards > 0
 	DefaultWarmIPTarget    = 1
 	DefaultMinimumIPTarget = 1
@@ -252,6 +257,7 @@ type IPAMContext struct {
 	networkPolicyMode         string
 	enableMultiNICSupport     bool
 	withApiServer             bool
+	enableVPCFlowlogEnrichment bool
 }
 
 type kubeletConfig struct {
@@ -426,6 +432,7 @@ func New(k8sClient client.Client, withApiServer bool) (*IPAMContext, error) {
 	c.enableManageUntaggedMode = enableManageUntaggedMode()
 	c.enablePodIPAnnotation = EnablePodIPAnnotation()
 	c.enableMultiNICSupport = enableMultiNICSupport()
+	c.enableVPCFlowlogEnrichment = enableVPCFlowlogEnrichment()
 	c.networkPolicyMode, err = getNetworkPolicyMode()
 	if err != nil {
 		return nil, err
@@ -640,6 +647,12 @@ func (c *IPAMContext) nodeInit() error {
 				return err
 			}
 		}
+	}
+
+	// Update CNINode status with current traffic mappings on startup (for recovery after restart)
+	if err := c.UpdateCNINodePodIPAllocations(ctx); err != nil {
+		log.Warnf("Failed to update CNINode on startup: %v", err)
+		// Don't fail node init - this is non-critical
 	}
 
 	log.Debug("node init completed successfully")
@@ -1258,7 +1271,7 @@ func (c *IPAMContext) setupENI(eni string, eniMetadata awsutils.ENIMetadata, isT
 	}
 
 	// Add the ENI to the datastore
-	err = c.dataStoreAccess.GetDataStore(eniMetadata.NetworkCard).AddENI(eni, eniMetadata.DeviceNumber, eni == primaryENI, isTrunkENI, isEFAENI, routeTableID)
+	err = c.dataStoreAccess.GetDataStore(eniMetadata.NetworkCard).AddENI(eni, eniMetadata.DeviceNumber, eni == primaryENI, isTrunkENI, isEFAENI, eniMetadata.SubnetID, routeTableID)
 	if err != nil && err.Error() != datastore.DuplicatedENIError {
 		return errors.Wrapf(err, "failed to add ENI %s to data store", eni)
 	}
@@ -2050,6 +2063,10 @@ func enableMultiNICSupport() bool {
 	return utils.GetBoolAsStringEnvVar(envEnableMultiNICSupport, false)
 }
 
+func enableVPCFlowlogEnrichment() bool {
+	return utils.GetBoolAsStringEnvVar(envVPCFlowlogEnrichment, false)
+}
+
 func getNetworkPolicyMode() (string, error) {
 	value, exists := os.LookupEnv(envNetworkPolicyMode)
 	if !exists {
@@ -2747,4 +2764,111 @@ func (c *IPAMContext) SetAPIServerConnectivity(connected bool) {
 type Decisions struct {
 	Stats *datastore.DataStoreStats
 	IsLow bool
+}
+
+// TrafficMappingStatus represents an IP to pod mapping for VPC Flow Log enrichment.
+// This is defined locally to avoid dependency on unreleased VPC RC types.
+type TrafficMappingStatus struct {
+	ID           string            `json:"id"`
+	IP           string            `json:"ip"`
+	PodName      string            `json:"podName"`
+	PodNamespace string            `json:"podNamespace"`
+	PodUID       string            `json:"podUID"`
+	PodLabels    map[string]string `json:"podLabels,omitempty"`
+	BeginTime    int64             `json:"beginTime"`
+	EndTime      *int64            `json:"endTime,omitempty"`
+}
+
+// NetworkInterfaceStatus represents an ENI with its traffic mappings.
+// This is defined locally to avoid dependency on unreleased VPC RC types.
+type NetworkInterfaceStatus struct {
+	ID              string                 `json:"id"`
+	SubnetID        string                 `json:"subnetId"`
+	TrafficMappings []TrafficMappingStatus `json:"trafficMappings,omitempty"`
+}
+
+// UpdateCNINodePodIPAllocations updates the CNINode status with current active traffic mappings.
+// This provides pod identity information for VPC Flow Log enrichment.
+// The downstream watcher is responsible for diffing to detect deletions.
+func (c *IPAMContext) UpdateCNINodePodIPAllocations(ctx context.Context) error {
+	if !c.enableVPCFlowlogEnrichment {
+		return nil
+	}
+
+	if !c.withApiServer {
+		log.Debug("Skipping CNINode traffic mappings update - no API server connection")
+		return nil
+	}
+
+	// Collect ENI traffic mappings from all datastores
+	// SubnetID is now stored in datastore, no need to call GetAttachedENIs
+	var networkInterfaces []NetworkInterfaceStatus
+	totalMappings := 0
+
+	for _, ds := range c.dataStoreAccess.DataStores {
+		dsEniMappings := ds.GetENITrafficMappings()
+		for _, eniMapping := range dsEniMappings {
+			var mappings []TrafficMappingStatus
+			for _, mapping := range eniMapping.TrafficMappings {
+				// Skip entries without PodUID - these are IPs not assigned to pods
+				if mapping.PodUID == "" {
+					continue
+				}
+
+				mappings = append(mappings, TrafficMappingStatus{
+					ID:           mapping.ID,
+					IP:           mapping.IP,
+					PodName:      mapping.PodName,
+					PodNamespace: mapping.PodNamespace,
+					PodUID:       mapping.PodUID,
+					PodLabels:    mapping.PodLabels,
+					BeginTime:    mapping.BeginTime,
+					EndTime:      mapping.EndTime,
+				})
+				totalMappings++
+			}
+
+			// Only include ENIs that have mappings
+			if len(mappings) > 0 {
+				networkInterfaces = append(networkInterfaces, NetworkInterfaceStatus{
+					ID:              eniMapping.ENIID,
+					SubnetID:        eniMapping.SubnetID,
+					TrafficMappings: mappings,
+				})
+			}
+		}
+	}
+
+	log.Debugf("UpdateCNINodePodIPAllocations: collected %d mappings from datastore", totalMappings)
+
+	// Get current CNINode
+	cniNode := &rcv1alpha1.CNINode{}
+	if err := c.k8sClient.Get(ctx, types.NamespacedName{Name: c.myNodeName}, cniNode); err != nil {
+		log.Errorf("UpdateCNINodePodIPAllocations: failed to get CNINode %s: %v", c.myNodeName, err)
+		return errors.Wrap(err, "failed to get CNINode for status update")
+	}
+
+	log.Debugf("UpdateCNINodePodIPAllocations: got CNINode %s, UID=%s, resourceVersion=%s", 
+		c.myNodeName, cniNode.UID, cniNode.ResourceVersion)
+
+	// Update status using unstructured patch to avoid type dependency
+	patch := map[string]interface{}{
+		"status": map[string]interface{}{
+			"networkInterfaces": networkInterfaces,
+		},
+	}
+
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal status patch")
+	}
+
+	if err := c.k8sClient.Status().Patch(ctx, cniNode, client.RawPatch(types.MergePatchType, patchBytes)); err != nil {
+		log.Errorf("UpdateCNINodePodIPAllocations: failed to patch CNINode %s status (UID=%s, resourceVersion=%s): %v", 
+			c.myNodeName, cniNode.UID, cniNode.ResourceVersion, err)
+		return errors.Wrap(err, "failed to patch CNINode status")
+	}
+
+	log.Infof("Updated CNINode status with %d ENIs and %d traffic mappings", len(networkInterfaces), totalMappings)
+	return nil
 }
